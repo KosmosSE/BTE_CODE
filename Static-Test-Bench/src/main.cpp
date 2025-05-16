@@ -1,209 +1,150 @@
-/*Developed by: Emanoel Henmerson Cavalcante Soares
-  Avionics Manager - Kosmos Rocketry
+#include "HX711.h"
+#include "FS.h"
+#include "SD.h"
+#include <SPI.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
-  Letícia Gabriely Witt
-  Research and Development Manager - Kosmos Rocketry
-  
-  Wagner Ferreira Barbosa Junior
-  Research and Development Analyst - Kosmos Rocketry
+#define SD_CS_PIN           5
+#define LOADCELL_DOUT_PIN   2
+#define LOADCELL_SCK_PIN    32
+#define TRANSDUTOR_PIN      34
 
-  Tayná da Silva Rosa
-  Research and Development Analyst - Kosmos Rocketry
+const int ciclos_coleta        = 120;
+const unsigned long intervalo_us = 10000; // 10 ms
 
-  Eric Marcel de Andrade Bliesener 
-  Acrux Aerospace Technologies
-  07/06/2024 */
-  
+HX711 scale;
 
-#include "HX711.h"   // Biblioteca para o sensor de carga HX711
-#include "FS.h"      // Biblioteca do sistema de arquivos
-#include "SD.h"      // Biblioteca para manipulação do cartão SD
-#include <SPI.h>     // Biblioteca SPI para comunicação
+// Dois buffers em RAM e índice compartilhado
+static String buffers[2];
+volatile int writeIndex = -1;
 
-// Definição dos pinos de comunicação do cartão SD - CS=5  MOSI = 23, sck = 18, MISO = 19;
-#define p_SD 5
+TaskHandle_t sdTaskHandle = NULL;
 
-// Definição dos pinos para o sensor de carga HX711
-const int LOADCELL_DOUT_PIN = 2;  // Pino de saída de dados do HX711
-const int LOADCELL_SCK_PIN = 32;  // Pino de clock do HX711
-
-float pressao_sd;
-float pressao_convertida;
-
-HX711 scale; // Criação de uma instância para o sensor de carga
-
-String dataMessage; // String para armazenar os dados a serem gravados no SD
-
-//configurações transdutor no pino 35
-#define transdutor 34
-#define avg_n 50
-
-unsigned long ti;
-unsigned long tf;
-unsigned long delta_t;
-
-// Função para criar um diretório no cartão SD
-void createDir(fs::FS &fs, const char *path) {
-  Serial.printf("Creating Dir: %s\n", path);
-  if (fs.mkdir(path)) {
-    Serial.println("Dir created");
-  } else {
-    Serial.println("mkdir failed");
+// Função que faz uma só vez a abertura do arquivo e escreve dados (com debug)
+void appendToSD(const String &data) {
+  static File file;
+  static bool opened = false;
+  if (!opened) {
+    file = SD.open("/data_teste_morpheus.csv", FILE_APPEND);
+    if (!file) {
+      Serial.println("[appendToSD] Falha ao abrir o arquivo para append");
+    } else {
+      Serial.println("[appendToSD] Arquivo aberto com sucesso para append");
+      opened = true;
+    }
+  }
+  if (opened) {
+    size_t written = file.print(data);
+    if (written == 0) {
+      Serial.println("[appendToSD] Falha ao escrever no arquivo");
+    } else {
+      Serial.printf("[appendToSD] Escreveu %u bytes\n", written);
+    }
+    file.flush(); // força escrita imediata
   }
 }
 
-// Função para adicionar dados ao final de um arquivo no cartão SD
-void appendFile(fs::FS &fs, const char * path, const char * message){
-  //Serial.printf("Appending to file: %s\n", path);
-
-  File file = fs.open(path, FILE_APPEND); // Abre o arquivo no modo de adição
-  if(!file){
-    Serial.println("Failed to open file for appending");
-    return;
+// Task que fica no Core 1 e grava buffers quando sinalizados
+void sdWriteTask(void *param) {
+  unsigned long start_us, end_us;
+  while (true) {
+    if (writeIndex >= 0) {
+      start_us = micros();
+      // Serial.printf("[SD Task] Gravando buffer %d em %lu us\n", writeIndex, start_us);
+      appendToSD(buffers[writeIndex]);
+      end_us = micros();
+      // Serial.printf("[SD Task] Tempo de gravação do buffer %d: %lu us\n", writeIndex, end_us - start_us);
+      buffers[writeIndex].clear();
+      writeIndex = -1;
+    }
+    vTaskDelay(pdMS_TO_TICKS(1)); // rende
   }
-  if(file.print(message)){
-    //Serial.println("Message appended");
-  } else {
-    Serial.println("Append failed");
-  }
-  file.close();
 }
 
-// Função para ler o conteúdo de um arquivo do cartão SD
-void readFile(fs::FS &fs, const char * path){
-  Serial.printf("Reading file: %s\n", path);
+// Task que roda no Core 0, coletando dados e alternando buffers
+void collectData() {
+  unsigned long start_us, end_us;
+  int bufIndex = 0;
+  buffers[0] = "";
+  buffers[1] = "";
 
-  File file = fs.open(path);
-  if(!file){
-    Serial.println("Failed to open file for reading");
-    return;
-  }
+  while (true) {
+    start_us = micros();
+    // Serial.printf("[Collect Task] Iniciando buffer %d em %lu us\n", bufIndex, start_us);
 
-  Serial.print("Read from file: ");
-  while(file.available()){
-    Serial.write(file.read());
+    // Preenche o buffer atual
+    for (int i = 0; i < ciclos_coleta; i++) {
+      unsigned long sample_us = micros();
+
+      float pressao_sd   = analogRead(TRANSDUTOR_PIN);
+      float pressao_conv = (pressao_sd - 602) / 94.73684210526;
+      float peso_kg      = scale.get_units(1);
+      float peso_N       = peso_kg * 9.81;
+      unsigned long ts   = millis();
+
+      buffers[bufIndex] +=
+        String(peso_kg)      + "," +
+        String(peso_N)       + "," +
+        String(pressao_sd)   + "," +
+        String(pressao_conv) + "," +
+        String(ts)           + "\n";
+
+      // Garante intervalo de 13 ms
+      while (micros() - sample_us < intervalo_us) { }
+    }
+
+    end_us = micros();
+    // Serial.printf("[Collect Task] Finalizou buffer %d em %lu us (duração: %lu us)\n",
+    //               bufIndex, end_us, end_us - start_us);
+
+    // Sinaliza ao SD task para gravar este buffer
+    writeIndex = bufIndex;
+    // Alterna buffer
+    bufIndex = 1 - bufIndex;
+    buffers[bufIndex].clear();
   }
-  file.close();
 }
 
-struct result //Transdutor
-{
-  float avg;
-  float std_dev;
-};
+void setup() {
+  Serial.begin(115200);
 
-result avg_read()//Transdutor
-{
-  float avg=0;
-  float leitura[avg_n];
-  float vari=0;
-  uint8_t i=0;
-  for (i=0; i<avg_n-1; i++) leitura[i] = static_cast <float> (analogRead(transdutor));
-  for (i=0; i<avg_n-1; i++) avg += leitura[i];
-  avg /= avg_n;
-  for (i=0; i<avg_n-1; i++) vari += (leitura[i]-avg)*(leitura[i]-avg);
-  return {avg, sqrt(vari/avg_n)};
-}
-
-float transductorFuncao()
-{
-  ti =  micros();
-  result media = avg_read();
-  tf = micros();
-  //leitura = map(sensor, 600, 4095, 0, 10000000); //Conversão para Pa usando como base 600 = 101325 (1 atm) regra de tres (min esp, max esp, min sensor, max do sensor)
-  //leitura = (sensor-600)/30;
-  Serial.printf ("Media: %f \nDesvio Padrao: %f \n" , media.avg, media.std_dev);
-  delta_t =  tf-ti;
-  Serial.printf ("Tempo para %d leituras: %d microssegundos", avg_n, delta_t);
-  //Serial.println(" Bar");
-  while (micros()-ti < 15000){}
-  Serial.println("\n\n-----------\n");
-  return media.avg;
-}
-// Função de configuração inicial do sistema
-void setup() {  
-
-  Serial.begin(115200); // Inicializa a comunicação serial a 9600 bps
-
-  Serial.println("Teste SD CARD");
-
-  // Verifica se o cartão SD foi montado corretamente
-  if (!SD.begin(p_SD)) {
-    Serial.println("Card Mount Failed");
-  } else {
-    Serial.println("Encontrou o modulo");
+  if (!SD.begin(SD_CS_PIN)) {
+    // Serial.println("Card Mount Failed");
+    while (1);
   }
 
-  uint8_t cardType = SD.cardType();
-
-  // Verifica o tipo do cartão SD
-  if (cardType == CARD_NONE) {
-    Serial.println("No SD card attached");
-  }else {
-    Serial.println("Encontrou o sd card");
-  }
-
-  Serial.print("SD Card Type: ");
-  if (cardType == CARD_MMC) {
-    Serial.println("MMC");
-  } else if (cardType == CARD_SD) {
-    Serial.println("SDSC");
-  } else if (cardType == CARD_SDHC) {
-    Serial.println("SDHC");
-  } else {
-    Serial.println("UNKNOWN");
-  }
-
-  // Calibração da célula de carga
-  Serial.println("Initializing the scale");
-
+  // Configura HX711
   scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
-  
-  /*----------------------------------------------------------------------------------------------------------------
-  --------------------------------------------------------------------------------------------------*/
-  scale.set_scale(25499.0/6.098f);  // Define o fator de escala para o sensor de carga após a calibração 26409.0/6.098f
-  scale.tare();			// Define o peso inicial para zero
+  scale.set_scale(25772.0 / 6.098f);
+  scale.tare();
 
-  // Exibe informações de calibração do sensor de carga
-  Serial.println("After setting up the scale:");
+  // Remove e recria header do CSV
 
-  Serial.print("read: \t\t");
-  Serial.println(scale.read());               // Leitura direta do ADC
+  File header = SD.open("/data_teste_morpheus.csv", FILE_WRITE);
+  if (header) {
+    header.print("peso_kg,peso_N,pressao_sd,pressao_conv,tempo\n");
+    header.close();
+    // Serial.println("[setup] Header escrito e arquivo fechado");
+  } else {
+    // Serial.println("[setup] Falha ao criar arquivo de header");
+  }
 
-  Serial.print("read average: \t\t");
-  Serial.println(scale.read_average(20));     // Média de 20 leituras do ADC
+  // Cria task de escrita no Core 1
+  xTaskCreatePinnedToCore(
+    sdWriteTask,       // função
+    "SD Write Task",   // nome
+    4096,              // stack
+    NULL,              // parâmetro
+    1,                 // prioridade
+    &sdTaskHandle,     // handle
+    1                  // core 1
+  );
 
-  Serial.print("get value: \t\t");
-  Serial.println(scale.get_value(5));		    // Média de 5 leituras menos o peso inicial
-
-  Serial.print("get units: \t\t");
-  Serial.println(scale.get_units(10), 1);     // Conversão da média de 10 leituras para unidades de peso
-
-  Serial.println("Readings:");
-    
-  // Grava o cabeçalho do arquivo no cartão SD
-  appendFile(SD, "/data.txt", "NEWTON, Corrente, MPa, tempo \n");
-
-  //Definição transdutor
-  pinMode(transdutor, INPUT);
+  // Inicia coleta no Core 0 (função não retorna)
+  collectData();
 }
 
-// Loop principal do código que será executado repetidamente
 void loop() {
-
-  ti =  micros();
-
-  pressao_sd = transductorFuncao(); 
-  pressao_convertida = (pressao_sd-590)/300; //calibracao leticia
-
-  // Montagem da string de dados com os valores lidos --alteração * 9.8
-  dataMessage = String(scale.get_units(1) * 9.8, 1) + " , " + String(pressao_sd) + " , " + String(pressao_convertida) + " , " + String(millis()) + "\r\n";
-  Serial.println(dataMessage); // Exibe os dados na serial
-
-
-  // Grava os dados no arquivo do cartão SD
-  appendFile(SD, "/data.txt", dataMessage.c_str());
-
-  //MUDAR NA HORA DO TESTE 150000 -> 15000
-  while (micros()-ti < 15000){} // Aguarda 15ms antes de realizar a próxima leitura
+  // tudo é feito nas tasks; loop vazio
 }
