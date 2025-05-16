@@ -54,7 +54,7 @@ void createDir(fs::FS &fs, const char *path) {
 
 // Função para adicionar dados ao final de um arquivo no cartão SD
 void appendFile(fs::FS &fs, const char * path, const char * message){
-  //Serial.printf("Appending to file: %s\n", path);
+  Serial.printf("Appending to file: %s\n", path);
 
   File file = fs.open(path, FILE_APPEND); // Abre o arquivo no modo de adição
   if(!file){
@@ -62,7 +62,7 @@ void appendFile(fs::FS &fs, const char * path, const char * message){
     return;
   }
   if(file.print(message)){
-    //Serial.println("Message appended");
+    Serial.println("Message appended");
   } else {
     Serial.println("Append failed");
   }
@@ -92,38 +92,16 @@ struct result //Transdutor
   float std_dev;
 };
 
-result avg_read()//Transdutor
-{
-  float avg=0;
-  float leitura[avg_n];
-  float vari=0;
-  uint8_t i=0;
-  for (i=0; i<avg_n-1; i++) leitura[i] = static_cast <float> (analogRead(transdutor));
-  for (i=0; i<avg_n-1; i++) avg += leitura[i];
-  avg /= avg_n;
-  for (i=0; i<avg_n-1; i++) vari += (leitura[i]-avg)*(leitura[i]-avg);
-  return {avg, sqrt(vari/avg_n)};
-}
 
-float transductorFuncao()
-{
-  ti =  micros();
-  result media = avg_read();
-  tf = micros();
-  //leitura = map(sensor, 600, 4095, 0, 10000000); //Conversão para Pa usando como base 600 = 101325 (1 atm) regra de tres (min esp, max esp, min sensor, max do sensor)
-  //leitura = (sensor-600)/30;
-  Serial.printf ("Media: %f \nDesvio Padrao: %f \n" , media.avg, media.std_dev);
-  delta_t =  tf-ti;
-  Serial.printf ("Tempo para %d leituras: %d microssegundos", avg_n, delta_t);
-  //Serial.println(" Bar");
-  while (micros()-ti < 15000){}
-  Serial.println("\n\n-----------\n");
-  return media.avg;
-}
+ float transductorFuncao() {
+    float sensor = 0;
+    sensor = analogRead(transdutor);  
+    return sensor;
+  }
 // Função de configuração inicial do sistema
 void setup() {  
 
-  Serial.begin(115200); // Inicializa a comunicação serial a 9600 bps
+  Serial.begin(115200); // Inicializa a comunicação serial a 115200 bps
 
   Serial.println("Teste SD CARD");
 
@@ -161,7 +139,7 @@ void setup() {
   
   /*----------------------------------------------------------------------------------------------------------------
   --------------------------------------------------------------------------------------------------*/
-  scale.set_scale(25499.0/6.098f);  // Define o fator de escala para o sensor de carga após a calibração 26409.0/6.098f
+  scale.set_scale(25772.0/6.098f);  // Define o fator de escala para o sensor de carga após a calibração 26409.0/6.098f
   scale.tare();			// Define o peso inicial para zero
 
   // Exibe informações de calibração do sensor de carga
@@ -182,7 +160,7 @@ void setup() {
   Serial.println("Readings:");
     
   // Grava o cabeçalho do arquivo no cartão SD
-  appendFile(SD, "/data.txt", "NEWTON, Corrente, MPa, tempo \n");
+  appendFile(SD, "/data.txt", "kg, newton, pressao_bruta, pressao_filtrada_Mpa, tempo \n");
 
   //Definição transdutor
   pinMode(transdutor, INPUT);
@@ -194,16 +172,17 @@ void loop() {
   ti =  micros();
 
   pressao_sd = transductorFuncao(); 
-  pressao_convertida = (pressao_sd-590)/300; //calibracao leticia
+  pressao_convertida = (pressao_sd - 550)/(94.73684210526); //calibracao transdutor
+  //pressao_10 = (pressao_sd-595)/300
 
   // Montagem da string de dados com os valores lidos --alteração * 9.8
-  dataMessage = String(scale.get_units(1) * 9.8, 1) + " , " + String(pressao_sd) + " , " + String(pressao_convertida) + " , " + String(millis()) + "\r\n";
-  Serial.println(dataMessage); // Exibe os dados na serial
-
-
+  //dataMessage = String(scale.get_units(1), 1) + " , " + String(scale.get_units(1) * 9.81, 1) + " , " + String(pressao_sd) + " , " + String(pressao_convertida) + " , " + String(millis()) + "\r\n";
+  dataMessage = String(String(scale.get_units(1), 1) + " , " + String(scale.get_units(1), 1) + " , " + String(pressao_sd) + " , " + String(pressao_convertida) + " , " + String(millis()) + "\r\n");
+  Serial.print(dataMessage); // Exibe os dados na serial
+  
   // Grava os dados no arquivo do cartão SD
   appendFile(SD, "/data.txt", dataMessage.c_str());
 
   //MUDAR NA HORA DO TESTE 150000 -> 15000
-  while (micros()-ti < 15000){} // Aguarda 15ms antes de realizar a próxima leitura
+    while (micros()-ti < 15000){} // Aguarda 15ms antes de realizar a próxima leitura
 }
