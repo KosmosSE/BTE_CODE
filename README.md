@@ -148,10 +148,3 @@ Contributions are welcome!
 ## 📄 License
 
 This project is licensed under the [MIT License](LICENSE).
-
----
-
-## 🙏 Acknowledgments
-
-* Inspired by FreeRTOS examples and the [HX711 library](https://github.com/bogde/HX711).
-* Thanks to the ESP32 community and Arduino ecosystem.
