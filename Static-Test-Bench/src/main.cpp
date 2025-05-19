@@ -1,3 +1,13 @@
+/*Developed by: Emanoel Henmerson Cavalcante Soares
+  Avionics Manager - Kosmos Rocketry
+  
+  Wagner Ferreira Barbosa Junior
+  Research and Development Analyst - Kosmos Rocketry
+
+  Tayná da Silva Rosa
+  Research and Development Analyst - Kosmos Rocketry
+ */
+
 #include "HX711.h"
 #include "FS.h"
 #include "SD.h"
